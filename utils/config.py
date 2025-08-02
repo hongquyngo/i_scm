@@ -198,9 +198,6 @@ APP_CONFIG = config.app_config
 INBOUND_EMAIL_CONFIG = config.get_email_config("inbound")
 OUTBOUND_EMAIL_CONFIG = config.get_email_config("outbound")
 
-# For backward compatibility with existing code
-EMAIL_SENDER = OUTBOUND_EMAIL_CONFIG["sender"]
-EMAIL_PASSWORD = OUTBOUND_EMAIL_CONFIG["password"]
 
 # Export all
 __all__ = [
