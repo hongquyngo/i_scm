@@ -1,0 +1,352 @@
+"""
+Allocation Cancellation Manager - Handles partial cancellation and reversal
+"""
+
+import pandas as pd
+from sqlalchemy import text
+from typing import Dict, List, Optional, Tuple
+import logging
+
+from utils.db import get_db_engine
+
+logger = logging.getLogger(__name__)
+
+
+class AllocationCancellationManager:
+    """Manages allocation cancellations with audit trail"""
+    
+    def __init__(self):
+        self.engine = get_db_engine()
+    
+    def cancel_quantity(self, detail_id: int, quantity: float, 
+                       reason: str, reason_category: str, user_id: int) -> Tuple[bool, str]:
+        """Cancel allocated quantity with audit trail"""
+        conn = self.engine.connect()
+        trans = conn.begin()
+        
+        try:
+            # Get current state from view
+            detail_query = text("""
+                SELECT 
+                    ads.*,
+                    ap.allocation_number
+                FROM allocation_delivery_status_view ads
+                JOIN allocation_plans ap ON ads.allocation_plan_id = ap.id
+                WHERE ads.id = :detail_id
+            """)
+            
+            result = conn.execute(detail_query, {'detail_id': detail_id})
+            detail = result.fetchone()
+            
+            if not detail:
+                return False, "Allocation detail not found"
+            
+            # Check if can be cancelled
+            if detail['detail_status'] != 'ALLOCATED':
+                return False, f"Cannot cancel {detail['detail_status']} allocation"
+            
+            # Use computed cancellable quantity from view
+            cancellable = float(detail['remaining_qty'])
+            
+            if quantity > cancellable:
+                return False, f"Cannot cancel {quantity:.2f}. Only {cancellable:.2f} available"
+            
+            if quantity <= 0:
+                return False, "Cancel quantity must be greater than 0"
+            
+            # Get user name for audit - Fixed to use employees table with concat
+            user_query = text("SELECT username FROM users WHERE id = :user_id AND delete_flag = 0")
+            user_result = conn.execute(user_query, {'user_id': user_id})
+            user_row = user_result.fetchone()
+            cancelled_by_name = user_row[0] if user_row else f'User {user_id}'
+            
+            # Insert cancellation record - REMOVED cancelled_by_name field that doesn't exist
+            cancel_insert = text("""
+                INSERT INTO allocation_cancellations 
+                (allocation_detail_id, allocation_plan_id, cancelled_qty, 
+                reason, reason_category, cancelled_by_user_id, status)
+                VALUES (:detail_id, :plan_id, :qty, :reason, :category, :user_id, 'ACTIVE')
+            """)
+            
+            conn.execute(cancel_insert, {
+                'detail_id': detail_id,
+                'plan_id': detail['allocation_plan_id'],
+                'qty': quantity,
+                'reason': reason,
+                'category': reason_category,
+                'user_id': user_id
+            })
+            
+            trans.commit()
+            
+            # Determine message based on impact
+            new_remaining = cancellable - quantity
+            
+            if new_remaining <= 0:
+                status_msg = "Allocation fully cancelled"
+            else:
+                status_msg = f"Cancellation applied. Remaining: {new_remaining:.2f}"
+            
+            logger.info(f"Cancelled {quantity} for allocation detail {detail_id} by {cancelled_by_name}")
+            return True, status_msg
+            
+        except Exception as e:
+            trans.rollback()
+            logger.error(f"Error cancelling allocation: {str(e)}")
+            return False, f"Error: {str(e)}"
+        finally:
+            conn.close()
+
+    def get_cancellable_quantity(self, detail_id: int) -> float:
+        """Get quantity available for cancellation"""
+        try:
+            query = text("""
+                SELECT 
+                    ad.allocated_qty,
+                    ad.delivered_qty,
+                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled
+                FROM allocation_details ad
+                LEFT JOIN allocation_cancellations ac ON ad.id = ac.allocation_detail_id
+                WHERE ad.id = :detail_id
+                GROUP BY ad.id, ad.allocated_qty, ad.delivered_qty
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'detail_id': detail_id})
+                row = result.fetchone()
+                
+                if row:
+                    return float(row['allocated_qty']) - float(row['delivered_qty']) - float(row['total_cancelled'])
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"Error getting cancellable quantity: {str(e)}")
+            return 0.0
+    
+    def reverse_cancellation(self, cancellation_id: int, user_id: int, reason: str) -> Tuple[bool, str]:
+        """Reverse a cancellation (restore allocated quantity)"""
+        conn = self.engine.connect()
+        trans = conn.begin()
+        
+        try:
+            # Get cancellation record
+            cancel_query = text("""
+                SELECT ac.*, ad.delivered_qty, ad.status as detail_status
+                FROM allocation_cancellations ac
+                JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
+                WHERE ac.id = :cancel_id AND ac.status = 'ACTIVE'
+            """)
+            
+            result = conn.execute(cancel_query, {'cancel_id': cancellation_id})
+            cancellation = result.fetchone()
+            
+            if not cancellation:
+                return False, "Cancellation not found or already reversed"
+            
+            # Check if any quantity has been delivered since cancellation
+            if float(cancellation['delivered_qty']) > 0:
+                return False, "Cannot reverse - some quantity already delivered"
+            
+            # Get user name for audit
+            user_query = text("SELECT username FROM users WHERE id = :user_id AND delete_flag = 0")
+            user_result = conn.execute(user_query, {'user_id': user_id})
+            user_row = user_result.fetchone()
+            reversed_by_name = user_row[0] if user_row else f'User {user_id}'
+            
+            # Reverse the cancellation - Fixed field name
+            reverse_update = text("""
+                UPDATE allocation_cancellations
+                SET status = 'REVERSED',
+                    reversed_by_user_id = :user_id,
+                    reversed_date = NOW(),
+                    reversal_reason = :reason
+                WHERE id = :cancel_id
+            """)
+            
+            conn.execute(reverse_update, {
+                'cancel_id': cancellation_id,
+                'user_id': user_id,
+                'reason': reason
+            })
+            
+            # Update detail status if it was cancelled
+            if cancellation['detail_status'] == 'CANCELLED':
+                status_update = text("""
+                    UPDATE allocation_details
+                    SET status = 'ALLOCATED'
+                    WHERE id = :detail_id
+                """)
+                conn.execute(status_update, {'detail_id': cancellation['allocation_detail_id']})
+            
+            trans.commit()
+            
+            logger.info(f"Reversed cancellation {cancellation_id} by {reversed_by_name}")
+            return True, f"Cancellation reversed. Restored quantity: {cancellation['cancelled_qty']:.2f}"
+            
+        except Exception as e:
+            trans.rollback()
+            logger.error(f"Error reversing cancellation: {str(e)}")
+            return False, f"Error: {str(e)}"
+        finally:
+            conn.close()
+    
+    def get_cancellation_history(self, plan_id: Optional[int] = None, 
+                               detail_id: Optional[int] = None) -> pd.DataFrame:
+        """Get cancellation history for a plan or detail"""
+        try:
+            # Fixed table references and join
+            query = """
+                SELECT 
+                        ac.*,
+                        ad.pt_code,
+                        ad.customer_name,
+                        ad.allocated_qty as original_allocated,
+                        ad.delivered_qty,
+                        u1.username as cancelled_by,
+                        u2.username as reversed_by
+                    FROM allocation_cancellations ac
+                    JOIN allocation_details ad ON ac.allocation_detail_id = ad.id
+                    LEFT JOIN users u1 ON ac.cancelled_by_user_id = u1.id AND u1.delete_flag = 0
+                    LEFT JOIN users u2 ON ac.reversed_by_user_id = u2.id AND u2.delete_flag = 0
+                    WHERE 1=1
+            """
+            
+            params = {}
+            
+            if plan_id:
+                query += " AND ac.allocation_plan_id = :plan_id"
+                params['plan_id'] = plan_id
+            
+            if detail_id:
+                query += " AND ac.allocation_detail_id = :detail_id"
+                params['detail_id'] = detail_id
+            
+            query += " ORDER BY ac.cancelled_date DESC"
+            
+            df = pd.read_sql(text(query), self.engine, params=params)
+            
+            # Format dates
+            date_cols = ['cancelled_date', 'reversed_date']
+            for col in date_cols:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col])
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting cancellation history: {str(e)}")
+            return pd.DataFrame()
+    
+    def validate_cancellation(self, detail_id: int, quantity: float) -> Tuple[bool, str]:
+        """Validate if cancellation is allowed"""
+        try:
+            # Get current state
+            query = text("""
+                SELECT 
+                    ad.*,
+                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled
+                FROM allocation_details ad
+                LEFT JOIN allocation_cancellations ac ON ad.id = ac.allocation_detail_id
+                WHERE ad.id = :detail_id
+                GROUP BY ad.id
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'detail_id': detail_id})
+                detail = result.fetchone()
+                
+                if not detail:
+                    return False, "Allocation detail not found"
+                
+                # Only ALLOCATED status can be cancelled
+                if detail['status'] != 'ALLOCATED':
+                    return False, f"Cannot cancel allocation with status: {detail['status']}"
+                
+                cancellable = float(detail['allocated_qty']) - float(detail['delivered_qty']) - float(detail['total_cancelled'])
+                
+                if quantity > cancellable:
+                    return False, f"Requested quantity ({quantity:.2f}) exceeds cancellable amount ({cancellable:.2f})"
+                
+                if quantity <= 0:
+                    return False, "Cancel quantity must be positive"
+                
+                return True, "Cancellation valid"
+                
+        except Exception as e:
+            logger.error(f"Error validating cancellation: {str(e)}")
+            return False, f"Validation error: {str(e)}"
+    
+    def get_plan_cancellation_summary(self, plan_id: int) -> Dict:
+        """Get cancellation summary for a plan
+        
+        Args:
+            plan_id: Allocation plan ID
+            
+        Returns:
+            Dict with cancellation summary statistics
+        """
+        try:
+            query = text("""
+                SELECT 
+                    COUNT(DISTINCT ac.id) as total_cancellations,
+                    COUNT(DISTINCT CASE WHEN ac.status = 'ACTIVE' THEN ac.id END) as active_cancellations,
+                    COUNT(DISTINCT CASE WHEN ac.status = 'REVERSED' THEN ac.id END) as reversed_cancellations,
+                    COALESCE(SUM(CASE WHEN ac.status = 'ACTIVE' THEN ac.cancelled_qty ELSE 0 END), 0) as total_cancelled_qty
+                FROM allocation_cancellations ac
+                WHERE ac.allocation_plan_id = :plan_id
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'plan_id': plan_id})
+                row = result.fetchone()
+                
+                if row:
+                    # Fix: Access by index for tuple/Row result
+                    return {
+                        'total_cancellations': int(row[0] or 0),
+                        'active_cancellations': int(row[1] or 0),
+                        'reversed_cancellations': int(row[2] or 0),
+                        'total_cancelled_qty': float(row[3] or 0)
+                    }
+                
+            # Default values if no data
+            return {
+                'total_cancellations': 0,
+                'active_cancellations': 0,
+                'reversed_cancellations': 0,
+                'total_cancelled_qty': 0.0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting cancellation summary: {str(e)}")
+            # Return default values on error
+            return {
+                'total_cancellations': 0,
+                'active_cancellations': 0,
+                'reversed_cancellations': 0,
+                'total_cancelled_qty': 0.0
+            }
+
+    def bulk_cancel(self, detail_ids: List[int], reason: str, 
+                   reason_category: str, user_id: int) -> Tuple[int, List[str]]:
+        """Bulk cancel multiple allocation details"""
+        success_count = 0
+        errors = []
+        
+        for detail_id in detail_ids:
+            # Get cancellable quantity for each
+            cancellable = self.get_cancellable_quantity(detail_id)
+            
+            if cancellable > 0:
+                success, message = self.cancel_quantity(
+                    detail_id, cancellable, reason, reason_category, user_id
+                )
+                
+                if success:
+                    success_count += 1
+                else:
+                    errors.append(f"Detail {detail_id}: {message}")
+            else:
+                errors.append(f"Detail {detail_id}: No cancellable quantity")
+        
+        return success_count, errors
