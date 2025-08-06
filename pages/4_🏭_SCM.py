@@ -62,19 +62,30 @@ settings_manager = get_settings_manager()
 with st.sidebar:
     st.markdown("## 🏭 SCM Control Center")
     
+    # Check if there's a navigation request
+    navigate_to = st.session_state.pop('scm_navigate_to', None)
+    default_index = 0
+    
+    module_options = [
+        "📊 Dashboard",
+        "📤 Demand Analysis",
+        "📥 Supply Analysis",
+        "📊 GAP Analysis",
+        "🧩 Allocation Plan",
+        "📌 PO Suggestions",
+        "⚙️ Settings",
+        "📚 User Guide"
+    ]
+    
+    # If navigation requested, find the index
+    if navigate_to and navigate_to in module_options:
+        default_index = module_options.index(navigate_to)
+    
     # Module selection
     module = st.radio(
         "Select Module",
-        [
-            "📊 Dashboard",
-            "📤 Demand Analysis",
-            "📥 Supply Analysis",
-            "📊 GAP Analysis",
-            "🧩 Allocation Plan",
-            "📌 PO Suggestions",
-            "⚙️ Settings",
-            "📚 User Guide"
-        ],
+        module_options,
+        index=default_index,
         key="scm_module_selection"
     )
     
@@ -478,10 +489,10 @@ else:  # Dashboard (default)
             st.markdown("### 🚨 Address Shortages")
             st.write("Critical items need immediate attention")
             if st.button("→ Go to GAP Analysis", type="primary", use_container_width=True, key="gap_action"):
-                st.session_state.scm_module_selection = "📊 GAP Analysis"
+                st.session_state['scm_navigate_to'] = "📊 GAP Analysis"
                 st.rerun()
             if st.button("→ Create PO Plan", use_container_width=True, key="po_action"):
-                st.session_state.scm_module_selection = "📌 PO Suggestions"
+                st.session_state['scm_navigate_to'] = "📌 PO Suggestions"
                 st.rerun()
 
     with col2:
@@ -490,7 +501,7 @@ else:  # Dashboard (default)
             st.markdown("### 📦 Manage Allocations")
             st.write("Overdue orders need allocation")
             if st.button("→ Allocation Planning", type="primary", use_container_width=True, key="alloc_action"):
-                st.session_state.scm_module_selection = "🧩 Allocation Plan"
+                st.session_state['scm_navigate_to'] = "🧩 Allocation Plan"
                 st.rerun()
 
     with col3:
@@ -499,7 +510,7 @@ else:  # Dashboard (default)
             st.markdown("### 🗑️ Inventory Cleanup")
             st.write("Handle expired/expiring items")
             if st.button("→ Review Inventory", type="primary", use_container_width=True, key="inv_action"):
-                st.session_state.scm_module_selection = "📥 Supply Analysis"
+                st.session_state['scm_navigate_to'] = "📥 Supply Analysis"
                 st.rerun()
 
     # === Auto-refresh Logic ===

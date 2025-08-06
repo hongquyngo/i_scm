@@ -1,4 +1,4 @@
-# pages/3_📊_GAP_Analysis.py
+# modules/scm/gap_analysis.py
 
 import streamlit as st
 import pandas as pd
@@ -2603,7 +2603,9 @@ def show_action_buttons(gap_df):
                         type="primary", 
                         use_container_width=True,
                         key="gap_create_allocation_btn"):
-                st.switch_page("pages/4_🧩_Allocation_Plan.py")
+                # Use a separate key for navigation request
+                st.session_state['scm_navigate_to'] = "🧩 Allocation Plan"
+                st.switch_page("pages/4_🏭_SCM.py")
         else:
             st.info("✅ No products require allocation (no items with both demand and supply)")
     
@@ -2626,7 +2628,8 @@ def show_action_buttons(gap_df):
                         type="secondary", 
                         use_container_width=True,
                         key="gap_generate_po_btn"):
-                st.switch_page("pages/5_📌_PO_Suggestions.py")
+                st.session_state['scm_navigate_to'] = "📌 PO Suggestions"
+                st.switch_page("pages/4_🏭_SCM.py")
         else:
             st.success("✅ No shortage detected")
     
