@@ -3071,37 +3071,6 @@ def get_allocation_manager():
 allocation_manager = get_allocation_manager()
 
 
-# === Debug Mode Toggle ===
-col_debug1, col_debug2 = st.columns([6, 1])
-with col_debug2:
-    debug_mode = st.checkbox("🐛 Debug Mode", value=False, key="debug_mode")
-
-if debug_mode:
-    st.info("🐛 Debug Mode is ON - Additional information will be displayed")
-    
-    # Show current allocation state
-    with st.expander("🔍 Current Session State (Allocation)", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Mode & Step:**")
-            st.write(f"- allocation_mode: {st.session_state.get('allocation_mode', 'N/A')}")
-            st.write(f"- allocation_step: {st.session_state.get('allocation_step', 'N/A')}")
-            st.write(f"- selected_allocation_id: {st.session_state.get('selected_allocation_id', 'N/A')}")
-        
-        with col2:
-            st.write("**Data State:**")
-            draft = st.session_state.get('draft_allocation', {})
-            st.write(f"- draft_allocation keys: {list(draft.keys()) if draft else 'Empty'}")
-            st.write(f"- selected products: {len(st.session_state.get('selected_allocation_products', []))} items")
-            
-            # Check if we have GAP data
-            gap_data = st.session_state.get('gap_analysis_result')
-            if gap_data is not None and hasattr(gap_data, 'shape'):
-                st.write(f"- GAP data available: {gap_data.shape}")
-            else:
-                st.write("- GAP data: Not available")
-
-
 def show_allocation_plan():
     # === Header ===
     DisplayComponents.show_page_header(
@@ -3110,6 +3079,36 @@ def show_allocation_plan():
         prev_page="pages/3_📊_GAP_Analysis.py",
         next_page="pages/5_📌_PO_Suggestions.py"
     )
+    # === Debug Mode Toggle ===
+    col_debug1, col_debug2 = st.columns([6, 1])
+    with col_debug2:
+        debug_mode = st.checkbox("🐛 Debug Mode", value=False, key="debug_mode")
+
+    if debug_mode:
+        st.info("🐛 Debug Mode is ON - Additional information will be displayed")
+        
+        # Show current allocation state
+        with st.expander("🔍 Current Session State (Allocation)", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Mode & Step:**")
+                st.write(f"- allocation_mode: {st.session_state.get('allocation_mode', 'N/A')}")
+                st.write(f"- allocation_step: {st.session_state.get('allocation_step', 'N/A')}")
+                st.write(f"- selected_allocation_id: {st.session_state.get('selected_allocation_id', 'N/A')}")
+            
+            with col2:
+                st.write("**Data State:**")
+                draft = st.session_state.get('draft_allocation', {})
+                st.write(f"- draft_allocation keys: {list(draft.keys()) if draft else 'Empty'}")
+                st.write(f"- selected products: {len(st.session_state.get('selected_allocation_products', []))} items")
+                
+                # Check if we have GAP data
+                gap_data = st.session_state.get('gap_analysis_result')
+                if gap_data is not None and hasattr(gap_data, 'shape'):
+                    st.write(f"- GAP data available: {gap_data.shape}")
+                else:
+                    st.write("- GAP data: Not available")
+
 
     # === Additional Debug Info ===
     if debug_mode:
